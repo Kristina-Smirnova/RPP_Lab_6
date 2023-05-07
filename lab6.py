@@ -15,7 +15,7 @@ import psycopg2
 
 def get_currency_rates():
     conn = psycopg2.connect(
-        host="localhost",
+        host="10.60.102.11",
         database="postgres",
         user="postgres",
         password="postgres"
@@ -24,13 +24,8 @@ def get_currency_rates():
     cursor.execute("SELECT currency_name, rate FROM currencies")
     rows = cursor.fetchall()
     conn.close()
+    logging.info(rows)
     return rows
-
-# Создание курсора для выполнения SQL-запросов
-# cur = conn.cursor()
-
-# Закрытие соединения с базой данных PostgreSQL
-# conn.close()
 
 
 # Активация системы логирования
@@ -48,9 +43,12 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 saved_state_global = {}
 
 
-class Step1(StatesGroup):
-    currency_name = State()
-    rate = State()
+class ManageStateGroup(StatesGroup):
+    Add_currency_name_state = State()
+    Add_currency_rate_state = State()
+    Edit_currency_name_state = State()
+    Edit_currency_rate_state = State()
+    Delete_currency_state = State()
 
 
 class Step2(StatesGroup):
@@ -67,7 +65,7 @@ async def add_chat_id(message: types.Message):
 
 def add_chat_id(chat_id):
     conn = psycopg2.connect(
-            host="localhost",
+            host="10.60.102.11",
             database="postgres",
             user="postgres",
             password="postgres"
@@ -80,19 +78,20 @@ def add_chat_id(chat_id):
 @dp.message_handler(commands=['get_currencies'])
 async def viewing_recorded_currencies(message: types.Message):
     currencies = get_currency_rates()
+    response = ""
     if currencies:
         response = "Курсы валют к рублю:\n"
         for rate in currencies:
             response += f"{rate[0]}: {rate[1]} руб.\n"
     else:
         response = "Курсы валют не найдены"
-    bot.send_message(message.chat.id, response)
+    await bot.send_message(message.chat.id, response)
 
 
 # Команды для админов
 admin_commands = [
-    BotCommand(command="/start", description="START"),
     BotCommand(command="/manage_currency", description="MANAGE CURRENCY"),
+    BotCommand(command="/start", description="START"),
     BotCommand(command="/get_currencies", description="GET CURRENCIES"),
     BotCommand(command="/convert", description="CONVERT")
 ]
@@ -104,62 +103,196 @@ user_commands = [
     BotCommand(command="/convert", description="CONVERT")
 ]
 
-ADMIN_ID = ["5278277671"]
+# Тут должен быть только числовой формат
+ADMIN_ID = [5278277671]
 
 
-async def setup_bot_commands(arg):
+async def setup_bot_commands(dispatcher: Dispatcher):
     await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
 
     for admin in ADMIN_ID:
         await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin))
 
 
-# Кнопки
-add_currency = KeyboardButton('Добавить валюту')
-delete_currency = KeyboardButton('Удалить валюту')
-change_rate = KeyboardButton('Изменить курс валюты')
+# Текст кнопок является также и командой, которую обработает бот
+add_currency = KeyboardButton(text='Добавить валюту')
+delete_currency = KeyboardButton(text='Удалить валюту')
+change_rate = KeyboardButton(text='Изменить валюту')
 
-markup = ReplyKeyboardMarkup().row(add_currency, delete_currency, change_rate)
+markup = ReplyKeyboardMarkup(resize_keyboard=True).row(add_currency, delete_currency, change_rate)
 
 
 # Обработчик команды /add_currency
-@dp.message_handler(commands=['add_currency'])
+@dp.message_handler(regexp=r"^Добавить валюту$")
 async def add_currency_command(message: types.Message):
-    await Step1.currency_name.set()
+    """
+    Обрабатывает любую строку, которая удовлетваряет паттерну 'Добавить валюту'
+    Устанавливает состояние Step1.currency_name (Задание имени валюты для конвертации)
+
+    :param message: сообщение от пользователя
+    :return: ничего
+    """
+    await ManageStateGroup.Add_currency_name_state.set()
     await message.reply("Введите название валюты")
 
 
-# Здесь были обработчики для удаления валюты и изменения курса
+# Обработчик команды /delete_currency
+@dp.message_handler(regexp=r"^Удалить валюту$")
+async def command_delete_currency(message: types.Message):
+    await message.reply("Введите название валюты, которую вы хотите удалить")
+    await ManageStateGroup.Delete_currency_state.set()
 
 
-# Обработка
-@dp.message_handler(state=Step1.currency_name)
-async def process_currency(message: types.Message, state: FSMContext):
-    await state.update_data(currency_name=message.text)
-    user_data = await state.get_data()
-    await Step1.rate.set()
-    await message.reply("Введите курс валюты к рублю")
+@dp.message_handler(state=ManageStateGroup.Delete_currency_state)
+async def process_delete_currency(message: types.Message, state: FSMContext):
+    currency_name = message.text
+    try:
+        delete_currency_in_database(currency_name=currency_name)
+        await message.answer("Валюта удалена")
+    except Exception as e:
+        logging.error("Ошибка удаления из БД", e)
+        # Если у ошибки есть сообщение, то выводим его пользователю в качестве причины ошибки
+        error_message = e.args[0] if len(e.args) > 0 else "Причина неизвестна"
+        await message.answer(f"Валюту не удалось удалить: {error_message}")
+    finally:
+        await state.finish()
 
 
-def add_currency_in_database(currency_name):
+def delete_currency_in_database(currency_name: str):
     conn = psycopg2.connect(
-            host="localhost",
+            host="10.60.102.11",
             database="postgres",
             user="postgres",
             password="postgres"
         )
     cursor = conn.cursor()
-    cursor.execute("""insert into currencies (id, currency_name, rate) VALUES  (:id, :currency_name, :rate) """,
-                   {"id": id, "currency_name": Step1.currency_name, "rate": Step1.rate})
+    # Запрашиваем все имеющиеся валюты, по параметру currency_name
+    cursor.execute("SELECT 1 FROM currencies WHERE currency_name = %(currency_name)s", {"currency_name": currency_name})
+    found_currencies = cursor.fetchall()
+
+    if len(found_currencies) == 0:
+        raise Exception("Валюты не существует")
+
+    cursor.execute(
+        "DELETE FROM currencies WHERE currency_name = %(currency_name)s", {"currency_name": currency_name}
+    )
+
+    # Для изменения валюты сделать ```UPDATE currencies SET rate=%(rate)s WHERE currency_name=%(currency_name)s```
+    conn.commit()
+    conn.close()
 
 
-@dp.message_handler(state=Step1.rate)
+# Обработчик команды /edit_currency
+@dp.message_handler(regexp=r"^Изменить валюту$")
+async def command_edit_currency(message: types.Message):
+    await message.reply("Введите название валюты, которую вы хотите изменить")
+    await ManageStateGroup.Edit_currency_name_state.set()
+
+
+@dp.message_handler(state=ManageStateGroup.Edit_currency_name_state)
+async def command_edit_currency(message: types.Message, state: FSMContext):
+    await message.reply("Введите новый курс валюты")
+    await state.update_data(currency_name=message.text)
+    await ManageStateGroup.Edit_currency_rate_state.set()
+
+
+@dp.message_handler(state=ManageStateGroup.Edit_currency_rate_state)
+async def process_edit_currency(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    rate = message.text
+    try:
+        edit_currency_in_database(currency_name=state_data['currency_name'], rate=rate)
+        await message.answer("Курс валюты изменен")
+    except Exception as e:
+        logging.error("Ошибка взаимодействия с БД", e)
+        # Если у ошибки есть сообщение, то выводим его пользователю в качестве причины ошибки
+        error_message = e.args[0] if len(e.args) > 0 else "Причина неизвестна"
+        await message.answer(f"Не удалось изменить курс валюты: {error_message}")
+    finally:
+        await state.finish()
+
+
+def edit_currency_in_database(currency_name: str, rate: int):
+    conn = psycopg2.connect(
+            host="10.60.102.11",
+            database="postgres",
+            user="postgres",
+            password="postgres"
+        )
+    cursor = conn.cursor()
+    # Запрашиваем все имеющиеся валюты, по параметру currency_name
+    cursor.execute("SELECT 1 FROM currencies WHERE currency_name = %(currency_name)s", {"currency_name": currency_name})
+    found_currencies = cursor.fetchall()
+
+    if len(found_currencies) == 0:
+        raise Exception("Валюты не существует")
+
+    cursor.execute(
+        "UPDATE currencies SET rate=%(rate)s WHERE currency_name=%(currency_name)s",
+        {"currency_name": currency_name, "rate": rate}
+    )
+
+    # Для изменения валюты сделать ```UPDATE currencies SET rate=%(rate)s WHERE currency_name=%(currency_name)s```
+    conn.commit()
+    conn.close()
+
+
+# Обработка
+@dp.message_handler(state=ManageStateGroup.Add_currency_name_state)
+async def process_currency(message: types.Message, state: FSMContext):
+    await state.update_data(currency_name=message.text)
+    user_data = await state.get_data()
+    await ManageStateGroup.Add_currency_rate_state.set()
+    await message.reply("Введите курс валюты к рублю")
+
+
+def add_currency_in_database(currency_name: str, rate: int):
+    conn = psycopg2.connect(
+            host="10.60.102.11",
+            database="postgres",
+            user="postgres",
+            password="postgres"
+        )
+    cursor = conn.cursor()
+    # Запрашиваем все имеющиеся валюты, по параметру currency_name
+    cursor.execute("SELECT 1 FROM currencies WHERE currency_name = %(currency_name)s", {"currency_name": currency_name})
+    found_currencies = cursor.fetchall()
+
+    # Если найдена хотя бы одна валюта, currency_name которой совпадает с тем, что мы пытаемся сохранить, тогда
+    # кидаем исключение с текстом "Валюта уже существует"
+    if len(found_currencies) > 0:
+        raise Exception("Валюта уже существует")
+
+    cursor.execute(
+        "INSERT INTO currencies(currency_name, rate) VALUES (%(currency_name)s, %(rate)s)",
+        {
+            "currency_name": currency_name,
+            "rate": rate
+        }
+    )
+    conn.commit()
+    conn.close()
+
+
+@dp.message_handler(state=ManageStateGroup.Add_currency_rate_state)
 async def process_rate(message: types.Message, state: FSMContext):
     await state.update_data(rate=message.text)
     user_data = await state.get_data()
     saved_state_global['step1'] = user_data
-    await state.finish()
-    await message.reply("Курс валюты сохранен")
+
+    try:
+        # Добавляем новую валюту в базу данных
+        add_currency_in_database(currency_name=user_data['currency_name'], rate=user_data['rate'])
+        # Если все прошло успешно, тогда выводим сообщение "Курс валюты сохранен"
+        await message.reply("Курс валюты сохранен")
+    except Exception as e:
+        # Если получаем ошибки, то логируем их
+        logging.error("Ошибка записи в БД", e)
+        # Если у ошибки есть сообщение, то выводим его пользователю в качестве причины ошибки
+        error_message = e.args[0] if len(e.args) > 0 else "Причина неизвестна"
+        await message.reply(f"Курс валюты не удалось сохранить: {error_message}")
+    finally:
+        await state.finish()
 
 
 @dp.message_handler(commands=['convert'])
@@ -183,7 +316,23 @@ async def process_convert(message: types.Message, state: FSMContext):
     await message.reply(math.floor(int(user_data['amount']) * int(saved_state_global['step1']['rate'])))
 
 
+@dp.message_handler(commands=['manage_currency'])
+async def process_manage_currency(message: types.Message):
+    """
+    Этот обработчик нужен для того, чтобы создать набор кнопок:
+    1) Добавить валюту
+    2) Удалить валюту
+    3) Изменить курс валюты
+
+    Далее за каждую кнопку будет отвечать свой обработчик.
+
+    :param message: сообщение
+    :return:
+    """
+    await message.reply(text="Выберите операцию из доступных", reply_markup=markup)
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     dp.middleware.setup(LoggingMiddleware())
-    executor.start_polling(dp, skip_updates=True)
+    executor.start_polling(dp, skip_updates=True, on_startup=setup_bot_commands)
